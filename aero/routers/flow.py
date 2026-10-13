@@ -110,6 +110,41 @@ def get_flow(flow_id: uuid.UUID, session: Session = Depends(get_session)):
     return _flow_out(f)
 
 
+
+
+class FlowRunIn(BaseModel):
+    force: bool = Field(default=False)
+    trigger_url: str | None = Field(default=None)
+    signed_url: str | None = Field(default=None)
+    source_data_id: uuid.UUID | None = Field(default=None)
+
+
+@router.post("/{flow_id}/run", response_model=FlowOut)
+# @authenticated
+def run_flow(
+    flow_id: uuid.UUID,
+    payload: FlowRunIn = FlowRunIn(),
+    session: Session = Depends(get_session),
+):
+    f = session.exec(select(Flow).where(Flow.id == flow_id)).first()
+    if f is None:
+        raise HTTPException(
+            status_code=404, detail=f"Flow with id {flow_id} was not found."
+        )
+    if f.policy not in (2, 3):  # ANY_INPUT, ALL_INPUT
+        raise HTTPException(
+            status_code=400,
+            detail=f"Flow policy {f.policy} does not support manual run. Only ANY_INPUT (2) and ALL_INPUT (3) are supported.",
+        )
+    f._run_flow(
+        session=session,
+        force=payload.force,
+        trigger_url=payload.trigger_url,
+        signed_url=payload.signed_url,
+        source_data_id=payload.source_data_id,
+    )
+    return _flow_out(f)
+
 @router.post("/register", response_model=FlowOut)
 # @authenticated
 def register(fi: FlowIn, session: Session = Depends(get_session)):

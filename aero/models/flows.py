@@ -196,6 +196,7 @@ class Flow(SQLModel, table=True):
         signed_url: str | None = None,
         source_data_id: UUID | None = None,
         at_registration: bool = False,
+        force: bool = False,
     ) -> int:
         # try:
         function_args = self.function_args
@@ -236,8 +237,23 @@ class Flow(SQLModel, table=True):
                 )
                 return self.policy
 
-            if self._has_new_input(require_all=self.policy == TriggerEnum.ALL_INPUT):
-                logger.info("flow %s: inputs are new, submitting run", self.id)
+            has_new = self._has_new_input(require_all=self.policy == TriggerEnum.ALL_INPUT)
+            versions = [s.last_version() for s in self.derived_from]
+            has_versions = len(versions) == len(self.derived_from) and all(
+                v is not None and v.created_at is not None for v in versions
+            )
+            if not has_versions:
+                logger.info(
+                    "flow %s: missing input versions, not running "
+                    "(input latest versions: %s)",
+                    self.id,
+                    {
+                        str(s.id): (v.created_at if (v := s.last_version()) else None)
+                        for s in self.derived_from
+                    },
+                )
+            elif force or has_new:
+                logger.info("flow %s: inputs ready, submitting run (force=%s new=%s)", self.id, force, has_new)
                 GLOBUS_CLIENT.run_flow(
                     id=self.id,
                     endpoint_uuid=self.user_endpoint,
@@ -253,12 +269,13 @@ class Flow(SQLModel, table=True):
                 self.last_executed = utcnow()
             else:
                 # The usual cause of "the analysis didn't run": every input's
-                # newest version predates last_executed.
+                # newest version predates last_executed (and force is False).
                 logger.info(
                     "flow %s: no input newer than last_executed=%s, not running "
-                    "(input latest versions: %s)",
+                    "(force=%s input latest versions: %s)",
                     self.id,
                     self.last_executed,
+                    force,
                     {
                         str(s.id): (v.created_at if (v := s.last_version()) else None)
                         for s in self.derived_from
