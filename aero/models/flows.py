@@ -189,6 +189,42 @@ class Flow(SQLModel, table=True):
         fresh = [c > self.last_executed for c in created]
         return all(fresh) if require_all else any(fresh)
 
+    def _input_run_decision(self, force: bool) -> tuple[bool, str | None]:
+        """Whether an ANY/ALL_INPUT flow should submit a run now, and why not if not.
+
+        Pure over the inputs' latest versions, ``last_executed`` and ``force``, so
+        asking ahead of ``_run_flow`` returns the same answer that ``_run_flow``
+        will act on. ``POST /flow/{id}/run`` relies on that to report whether it
+        submitted.
+
+        ``force`` skips the "has an input moved on since we last ran" test and
+        nothing else. Every input must still *have* a version: the run resolves
+        each one through ``GET /data/{id}/latest``, which 404s for a source that
+        was registered and never notified, and an analysis cannot be handed a file
+        that does not exist. A flow with no inputs at all never runs this way
+        either -- there is nothing for the pull function to fetch.
+        """
+        if not self.derived_from:
+            return False, "the flow has no inputs"
+
+        latest = {str(s.id): s.last_version() for s in self.derived_from}
+        missing = sorted(
+            k for k, v in latest.items() if v is None or v.created_at is None
+        )
+        if missing:
+            return False, f"inputs with no version yet: {', '.join(missing)}"
+
+        if force or self._has_new_input(
+            require_all=self.policy == TriggerEnum.ALL_INPUT
+        ):
+            return True, None
+
+        ages = {k: v.created_at for k, v in latest.items()}
+        return False, (
+            f"no input newer than last_executed={self.last_executed} "
+            f"(input latest versions: {ages})"
+        )
+
     def _run_flow(
         self,
         session: Session,
@@ -237,23 +273,11 @@ class Flow(SQLModel, table=True):
                 )
                 return self.policy
 
-            has_new = self._has_new_input(require_all=self.policy == TriggerEnum.ALL_INPUT)
-            versions = [s.last_version() for s in self.derived_from]
-            has_versions = len(versions) == len(self.derived_from) and all(
-                v is not None and v.created_at is not None for v in versions
-            )
-            if not has_versions:
+            submit, reason = self._input_run_decision(force=force)
+            if submit:
                 logger.info(
-                    "flow %s: missing input versions, not running "
-                    "(input latest versions: %s)",
-                    self.id,
-                    {
-                        str(s.id): (v.created_at if (v := s.last_version()) else None)
-                        for s in self.derived_from
-                    },
+                    "flow %s: inputs ready, submitting run (force=%s)", self.id, force
                 )
-            elif force or has_new:
-                logger.info("flow %s: inputs ready, submitting run (force=%s new=%s)", self.id, force, has_new)
                 GLOBUS_CLIENT.run_flow(
                     id=self.id,
                     endpoint_uuid=self.user_endpoint,
@@ -266,21 +290,14 @@ class Flow(SQLModel, table=True):
                     signed_url=signed_url,
                     source_data_id=source_data_id,
                 )
+                # Stamped on submission, not on success. A run that fails still
+                # moves last_executed forward, so every version that existed
+                # before it is now "old" and will not trigger the flow again --
+                # which is what the manual run endpoint's force is for.
                 self.last_executed = utcnow()
             else:
-                # The usual cause of "the analysis didn't run": every input's
-                # newest version predates last_executed (and force is False).
-                logger.info(
-                    "flow %s: no input newer than last_executed=%s, not running "
-                    "(force=%s input latest versions: %s)",
-                    self.id,
-                    self.last_executed,
-                    force,
-                    {
-                        str(s.id): (v.created_at if (v := s.last_version()) else None)
-                        for s in self.derived_from
-                    },
-                )
+                # The usual cause of "the analysis didn't run".
+                logger.info("flow %s: not running -- %s", self.id, reason)
 
         else:
             return self.policy

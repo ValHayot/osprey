@@ -1,3 +1,4 @@
+from unittest import mock
 from uuid import uuid4
 
 import aero.models as models
@@ -255,37 +256,92 @@ def test_unknown_input_data_keys_reach_the_worker(client, data, noversion_data):
     assert stored["collection_url"] == data.collection_url
 
 
-def test_run_flow_force(client, session, data, noversion_data):
-    """Manual run endpoint submits ANY_INPUT flow regardless of input age."""
-    import aero.models
-    func = aero.models.function.create_function(session=session, uuid=uuid4())
-    p_func = aero.models.function.create_function(session=session, uuid=uuid4())
-    c_func = aero.models.function.create_function(session=session, uuid=uuid4())
-    analysis_flow = aero.models.flows.create_flow(
+def _analysis_flow(session, derived_from, contributed_to, policy=None):
+    """An ANY_INPUT flow, already past its registration-time run."""
+    return models.flows.create_flow(
         session=session,
-        derived_from=[data],
-        contributed_to=[noversion_data],
+        derived_from=derived_from,
+        contributed_to=contributed_to,
         endpoint=uuid4(),
-        function_id=func.id,
-        pull_function_id=p_func.id,
-        commit_function_id=c_func.id,
-        policy=aero.models.flows.TriggerEnum.ANY_INPUT,
+        function_id=models.function.create_function(session=session, uuid=uuid4()).id,
+        pull_function_id=models.function.create_function(
+            session=session, uuid=uuid4()
+        ).id,
+        commit_function_id=models.function.create_function(
+            session=session, uuid=uuid4()
+        ).id,
+        policy=policy if policy is not None else models.flows.TriggerEnum.ANY_INPUT,
     )
 
-    # Force should submit even when data hasn't moved
-    response = client.post(
-        f"/flow/{analysis_flow.id}/run",
-        json={"force": True},
-        headers={"Content-Type": "application/json"},
-    )
-    assert response.status_code == 200, response.json()
-    assert response.json()["id"] == str(analysis_flow.id)
 
-    # Default (force=False) should skip when no new input
-    response_no_force = client.post(
-        f"/flow/{analysis_flow.id}/run",
-        json={"force": False},
-        headers={"Content-Type": "application/json"},
+def test_run_flow_manual(client, session, data, noversion_data):
+    """force submits a run the ANY/ALL gate would otherwise skip, and says so.
+
+    Regression: the endpoint answered a bare 200 either way, so nothing in the
+    response distinguished a submitted run from a skipped one -- and the test
+    that covered it passed unchanged with `force` ignored in `_run_flow`.
+    """
+    flow = _analysis_flow(session, [data], [noversion_data])
+    # create_flow already made the registration-time run, so the input's one
+    # version now predates last_executed and nothing is new.
+
+    with mock.patch.object(models.flows.GLOBUS_CLIENT, "run_flow") as submit:
+        response = client.post(f"{ROUTE}/{flow.id}/run", json={"force": False})
+        assert response.status_code == 200, response.json()
+        assert response.json()["submitted"] is False
+        assert "no input newer than" in response.json()["reason"]
+        assert submit.call_count == 0
+
+        response = client.post(f"{ROUTE}/{flow.id}/run", json={"force": True})
+        assert response.status_code == 200, response.json()
+        assert response.json()["submitted"] is True
+        assert response.json()["reason"] is None
+        assert response.json()["flow"]["id"] == str(flow.id)
+        assert submit.call_count == 1
+
+
+def test_run_flow_force_still_needs_every_input_to_have_a_version(
+    client, session, data, noversion_data
+):
+    """force skips the staleness test, not the requirement that inputs exist.
+
+    The run resolves each input through `GET /data/{id}/latest`, which 404s for a
+    source registered and never notified.
+
+    Regression: the gate recomputed the version check as an `all()` over
+    `derived_from`, which is vacuously true for a flow with no inputs -- so force
+    submitted a run whose pull function had nothing to fetch.
+    """
+    no_version = _analysis_flow(session, [noversion_data], [])
+    no_inputs = _analysis_flow(session, [], [noversion_data])
+
+    with mock.patch.object(models.flows.GLOBUS_CLIENT, "run_flow") as submit:
+        for flow, expected in (
+            (no_version, "no version yet"),
+            (no_inputs, "no inputs"),
+        ):
+            response = client.post(f"{ROUTE}/{flow.id}/run", json={"force": True})
+            assert response.status_code == 200, response.json()
+            assert response.json()["submitted"] is False
+            assert expected in response.json()["reason"]
+        assert submit.call_count == 0
+
+
+def test_run_flow_rejects_timer_driven_policies(client, session, data, noversion_data):
+    """Only the input-driven analyses can be run by hand.
+
+    INGESTION_EVENT runs from the notify webhook, which carries a per-run source
+    url that a manual call cannot supply.
+    """
+    flow = _analysis_flow(
+        session, [data], [noversion_data], models.flows.TriggerEnum.INGESTION_EVENT
     )
-    assert response_no_force.status_code == 200, response_no_force.json()
-    assert response_no_force.json()["id"] == str(analysis_flow.id)
+
+    response = client.post(f"{ROUTE}/{flow.id}/run", json={"force": True})
+    assert response.status_code == 400, response.json()
+    assert "does not support a manual run" in response.json()["detail"]
+
+
+def test_run_unknown_flow(client):
+    response = client.post(f"{ROUTE}/{uuid4()}/run", json={"force": True})
+    assert response.status_code == 404

@@ -23,6 +23,7 @@ from aero.database import get_session
 
 from aero.models.flows import create_flow
 from aero.models.flows import Flow
+from aero.models.flows import TriggerEnum
 from aero.models.function import Function
 from aero.models.data import Data
 from aero.models.source_type import SourceType
@@ -110,6 +111,11 @@ def get_flow(flow_id: uuid.UUID, session: Session = Depends(get_session)):
     return _flow_out(f)
 
 
+# Only the input-driven analyses can be run by hand. INGESTION and TIMER are
+# driven by a Globus timer, and running them through _run_flow would register a
+# second one; INGESTION_EVENT runs from POST /data/{id}/notify, which carries the
+# per-run source url that a manual call has no way to supply.
+MANUAL_RUN_POLICIES = (TriggerEnum.ANY_INPUT, TriggerEnum.ALL_INPUT)
 
 
 class FlowRunIn(BaseModel):
@@ -119,23 +125,58 @@ class FlowRunIn(BaseModel):
     source_data_id: uuid.UUID | None = Field(default=None)
 
 
-@router.post("/{flow_id}/run", response_model=FlowOut)
+class FlowRunOut(BaseModel):
+    submitted: bool
+    reason: str | None = Field(default=None)
+    flow: FlowOut
+
+
+@router.post("/{flow_id}/run", response_model=FlowRunOut)
 # @authenticated
 def run_flow(
     flow_id: uuid.UUID,
     payload: FlowRunIn = FlowRunIn(),
     session: Session = Depends(get_session),
 ):
+    """Run an analysis flow now, on the data it already has.
+
+    For re-running an analysis whose last run failed, rather than waiting for the
+    next version of an input to trigger it.
+
+    `force` runs the flow even though no input has a new version since
+    `last_executed` -- which is the whole point after a failure, because the run
+    that failed moved `last_executed` past the data it was meant to process.
+    Without it the same gate that skipped the flow applies, and the call reports
+    `submitted: false` with the reason rather than failing.
+
+    An input with no version at all is never forced past: the run resolves each
+    input through `GET /data/{id}/latest`, which 404s for a source that has been
+    registered but never notified.
+
+    A no-copy input is read from the object store by url, and for a private
+    object that needs the presigned `signed_url` a notify would have carried.
+    Pass `signed_url` (with the `source_data_id` it belongs to) when re-running
+    one of those by hand, or the run will fail the way it does at registration.
+    """
     f = session.exec(select(Flow).where(Flow.id == flow_id)).first()
     if f is None:
         raise HTTPException(
             status_code=404, detail=f"Flow with id {flow_id} was not found."
         )
-    if f.policy not in (2, 3):  # ANY_INPUT, ALL_INPUT
+    if f.policy not in MANUAL_RUN_POLICIES:
+        supported = ", ".join(f"{p.name} ({p.value})" for p in MANUAL_RUN_POLICIES)
         raise HTTPException(
             status_code=400,
-            detail=f"Flow policy {f.policy} does not support manual run. Only ANY_INPUT (2) and ALL_INPUT (3) are supported.",
+            detail=(
+                f"Flow policy {f.policy} does not support a manual run. "
+                f"Only {supported} do."
+            ),
         )
+
+    # Asked before the run so the reason for a skip survives into the response.
+    # _run_flow re-evaluates it rather than taking it as an argument, and agrees:
+    # the decision is pure over state that nothing here mutates in between.
+    submitted, reason = f._input_run_decision(force=payload.force)
     f._run_flow(
         session=session,
         force=payload.force,
@@ -143,7 +184,8 @@ def run_flow(
         signed_url=payload.signed_url,
         source_data_id=payload.source_data_id,
     )
-    return _flow_out(f)
+    return FlowRunOut(submitted=submitted, reason=reason, flow=_flow_out(f))
+
 
 @router.post("/register", response_model=FlowOut)
 # @authenticated
