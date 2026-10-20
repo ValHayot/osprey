@@ -1,17 +1,16 @@
 [project]
-name = "DSaaS"
-description = "Data streams as a service"
-version = "0.0.1a"
+name = "AERO"
+description = "Autonomous event-based research orchestrator"
+version = "1.0.0"
 authors = [
     { name = "Valerie Hayot-Sasson", email = "vhayot@uchicago.edu"    },
+    { name = "Nicholson Collier", email = "ncollier@anl.gov"}
     { name = "Sudershan Sridhar",    email = "sudershan@uchicago.edu" }
 ]
 dependencies = [
-    "proxystore",
     "requests",
     "pandas",
     "jsonschema",
-    "psycopg2",
     "globus_compute_sdk",
     "dill",
     "globus_sdk>=4,<5",
@@ -33,9 +32,6 @@ dev = [
     "tox",
     "black"
 ]
-server = [
-    "flask==2.1.0",
-]
 
 [build-system]
 # These are the assumed default build requirements from pip:
@@ -56,8 +52,6 @@ branch = true
 omit = [
     "tests/*",
     "aero/database.py",
-    #"aero/app/decorators.py",
-    #"aero/globus/*",
     "aero/app/utils.py",
 ]
 fail_under = 100
