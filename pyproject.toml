@@ -4,7 +4,7 @@ description = "Autonomous event-based research orchestrator"
 version = "1.0.0"
 authors = [
     { name = "Valerie Hayot-Sasson", email = "vhayot@uchicago.edu"    },
-    { name = "Nicholson Collier", email = "ncollier@anl.gov"}
+    { name = "Nicholson Collier", email = "ncollier@anl.gov"},
     { name = "Sudershan Sridhar",    email = "sudershan@uchicago.edu" }
 ]
 dependencies = [
