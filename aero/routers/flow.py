@@ -93,6 +93,17 @@ def show_flows(
     limit: int = Query(default=15, le=15),
     session: Session = Depends(get_session),
 ):
+    """_summary_
+
+    Args:
+        offset (int, optional): _description_. Defaults to 0.
+        limit (int, optional): _description_. Defaults to Query(default=15, le=15).
+        session (Session, optional): _description_. Defaults to Depends(get_session).
+
+    Returns:
+        _type_: _description_
+    ewrwer
+    """
     flows = session.exec(
         select(Flow).order_by(Flow.id.desc()).offset(offset).limit(limit)
     ).all()

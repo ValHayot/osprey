@@ -23,7 +23,8 @@ dependencies = [
     # column types explicitly (aero.models.types.UTCDateTime), so that particular
     # drift cannot recur, but the rest of the schema is still inferred. Move this
     # deliberately, with the tests run against the new version first.
-    "sqlmodel==0.0.47"
+    "sqlmodel==0.0.47",
+    "mkdocstrings-python>=2.0.10",
 ]
 
 [project.optional-dependencies]
@@ -59,4 +60,9 @@ exclude_also = [
     "def search",
     "except ServiceError",
     "except Exception"
+]
+
+[dependency-groups]
+dev = [
+    "zensical>=0.0.71",
 ]
