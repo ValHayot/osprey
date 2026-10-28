@@ -3,17 +3,21 @@ import uuid
 
 from dataclasses import dataclass
 from typing import Any
+from unittest import mock
 
 from sqlmodel import Session
 from sqlmodel import create_engine
 from sqlmodel import SQLModel
 from sqlmodel.pool import StaticPool
 
-from globus_sdk import AuthClient
-from globus_sdk import SearchClient
-from globus_sdk import SearchAPIError
-from globus_sdk import SpecificFlowClient
-from globus_sdk import TimersClient
+from aero.globus import client
+from aero.globus.client import SearchAPIError
+
+engine = create_engine(
+    "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+)
+patcher = mock.patch("sqlmodel.create_engine", return_value=engine)
+patcher.start()
 
 
 @pytest.fixture(name="globus_mock", autouse=True)
@@ -44,47 +48,51 @@ def _mock_globus(monkeypatch):
 
             return Response()
 
-    def create_job(*args, **kwargs):
-        @dataclass
-        class Response:
-            http_status = 201
-            job_id = str(uuid.uuid4())
+    class MockSpecificTimerClient:
+        def create_job(*args, **kwargs):
+            @dataclass
+            class Response:
+                http_status = 201
+                timer = {"job_id": str(uuid.uuid4())}
 
-            def __getitem__(self, key: int | str) -> Any:
-                if isinstance(key, int):
-                    return list(self.__dict__.values())[key]
-                elif isinstance(key, str):
-                    return getattr(self, key)
-                else:
-                    raise TypeError("Index must be an integer or a string (field name)")
+                def __getitem__(self, key: int | str) -> Any:
+                    if isinstance(key, int):
+                        return list(self.__dict__.values())[key]
+                    elif isinstance(key, str):
+                        return getattr(self, key)
+                    else:
+                        raise TypeError(
+                            "Index must be an integer or a string (field name)"
+                        )
 
-        return Response()
+            return Response()
 
     monkeypatch.setattr(
-        SearchClient,
+        client.SearchClient,
         "create_index",
         create_search_index,
     )
-    monkeypatch.setattr(SearchClient, "ingest", search_ingest)
-    monkeypatch.setattr(AuthClient, "get_identities", get_auth_identity)
+    monkeypatch.setattr(client.SearchClient, "ingest", search_ingest)
+    monkeypatch.setattr(client.AuthClient, "get_identities", get_auth_identity)
     monkeypatch.setattr(
-        SpecificFlowClient,
+        client.SpecificFlowClient,
         "run_flow",
         MockSpecificFlowClient.run_flow,
     )
 
-    monkeypatch.setattr(TimersClient, "create_job", create_job)
+    monkeypatch.setattr(
+        client.TimersClient, "create_timer", MockSpecificTimerClient.create_job
+    )
     yield
 
 
 @pytest.fixture(name="session")
 def session_fixture():
-    engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
         yield session
+    SQLModel.metadata.drop_all(engine)
+    patcher.stop()
 
 
 # # dsc_mock = mock.patch("osprey.server.lib.globus_search.DSaaSSearchClient")
